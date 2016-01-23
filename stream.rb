@@ -1,0 +1,83 @@
+# Consolidates websoc1kets with polling, since websockets are flaky
+class Stream
+  def initialize(book)
+    @book       = book
+    @order_lock = Mutex.new
+
+    poll!   # will poll, and
+    stream! # also stream, but only publish each once
+  end
+
+  Disconnect = Class.new(StandardError)
+  def stream!
+    sockets do |socket|
+      socket.on(:open)  { @book.publish(:debug, 'socket:open') }
+      socket.on(:close) { raise Disconnect )
+      socket.on(:message) do |event|
+        @book.publish(:debug, 'socket:event', event)
+        JSON.parse(event).tap do |data|
+          quote_receipt_time = Time.now and try_quote(data)     if data['quote']
+          order_receipt_time = Time.now and try_execution(data) if data['order']
+        end
+      end
+    end
+
+    @book.on(:quote) do
+      raise Disconnect if (Time.now - quote_receipt_time).to_i > 10
+    end
+    @book.on(:execution) do
+      raise Disconnect if (Time.now - order_receipt_time).to_i > 10
+    end
+  rescue Disconnect
+    retry
+  end
+
+  def poll!
+    Thread.new do # Quotes
+      loop do
+        try_quote book.client['quote'].get
+        sleep 1
+      end
+    end
+
+    Thread.new do # Fills
+      loop do
+        sleep 5
+        begin
+          client = Order::CLIENT['venues/%s/accounts/%s/orders' %
+            [Order.venue, Order.account]]
+          JSON.parse(client.get).each &method(:try_order)
+        rescue
+          @book.publish(:debug, 'GET orderbook failed: ', $!.message)
+        end
+      end
+    end
+  end
+
+  def try_order(message)
+    Order.new(message).synchronize do |order|
+      s     = ->(o) { o.id == order.id }
+      order = [order, @book.find(&s)].compact.sort_by(&:filledAt).last
+      @book.delete_if(&s)
+      @book << order
+      order.once { @book.publish(:execution, order) }
+    end
+  end
+
+  def try_quote(message)
+    @book.ticker << quote
+    @book.publish(:quote, quote)
+  end
+
+protected
+
+  def sockets &block
+    EM.run do
+      %w[executions tickertape].each do |type|
+        yield Faye::WebSocket::Client.new(
+          SOCKET_URL % [Order.account, Order.venue, type])
+      end
+    end
+  end
+end
+
