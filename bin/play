@@ -1,0 +1,2 @@
+foreman run ruby levels/$1.rb
+

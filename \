@@ -2,7 +2,6 @@
 class Stream
   def initialize(book)
     @book       = book
-    @order_lock = Mutex.new
 
     poll!   # will poll, and
     stream! # also stream, but only publish each once
@@ -74,6 +73,7 @@ protected
   def sockets &block
     EM.run do
       %w[executions tickertape].each do |type|
+        @book.publish(:debug, 'socket:connecting', type)
         yield Faye::WebSocket::Client.new(
           SOCKET_URL % [Order.account, Order.venue, type])
       end

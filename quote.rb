@@ -1,4 +1,0 @@
-class Quote < OpenStruct
-
-end
-
